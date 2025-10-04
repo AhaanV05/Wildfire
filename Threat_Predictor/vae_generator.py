@@ -272,14 +272,14 @@ class WildfireVAEGenerator:
                     best_loss = avg_loss
                     patience_counter = 0
                     # Save best model
-                    torch.save(self.vae.state_dict(), 'best_vae_model.pth')
+                    torch.save(self.vae.state_dict(), 'VAE_Dist/best_vae_model.pth')
                     logger.info(f"   💾 New best model saved! Loss: {best_loss:.4f}")
                 else:
                     patience_counter += 1
                 
                 # Save periodic checkpoints
                 if epoch % save_interval == 0 and epoch > 0:
-                    checkpoint_name = f'vae_checkpoint_epoch_{epoch}.pth'
+                    checkpoint_name = f'VAE_Dist/vae_checkpoint_epoch_{epoch}.pth'
                     torch.save({
                         'epoch': epoch,
                         'model_state_dict': self.vae.state_dict(),
@@ -308,12 +308,12 @@ class WildfireVAEGenerator:
             logger.info(f"   🛑 Training interrupted by user at epoch {epoch}")
             logger.info(f"   💾 Current best model saved with loss: {best_loss:.4f}")
             # Make sure we have the best model loaded
-            if Path('best_vae_model.pth').exists():
-                self.vae.load_state_dict(torch.load('best_vae_model.pth'))
+            if Path('VAE_Dist/best_vae_model.pth').exists():
+                self.vae.load_state_dict(torch.load('VAE_Dist/best_vae_model.pth'))
         
         # Load best model
-        if Path('best_vae_model.pth').exists():
-            self.vae.load_state_dict(torch.load('best_vae_model.pth'))
+        if Path('VAE_Dist/best_vae_model.pth').exists():
+            self.vae.load_state_dict(torch.load('VAE_Dist/best_vae_model.pth'))
             logger.info(f"✅ Best model loaded with final loss: {best_loss:.4f}")
         
         logger.info("✅ VAE training completed")
@@ -451,7 +451,7 @@ class WildfireVAEGenerator:
         
         return df
     
-    def save_combined_dataset(self, synthetic_df, output_file="vae_combined_dataset.csv"):
+    def save_combined_dataset(self, synthetic_df, output_file="VAE_Dist/vae_combined_dataset.csv"):
         """Combine real and VAE-generated synthetic data."""
         logger.info("📝 Combining real and VAE synthetic data...")
         
@@ -519,8 +519,8 @@ class WildfireVAEGenerator:
         plt.tight_layout()
         
         if save_plots:
-            plt.savefig('vae_data_comparison.png', dpi=300, bbox_inches='tight')
-            logger.info("📊 Saved VAE comparison plot to vae_data_comparison.png")
+            plt.savefig('VAE_Dist/vae_data_comparison.png', dpi=300, bbox_inches='tight')
+            logger.info("📊 Saved VAE comparison plot to VAE_Dist/vae_data_comparison.png")
         
         plt.show()
 
@@ -554,10 +554,11 @@ def main():
         generator.plot_vae_comparison(synthetic_data)
         
         logger.info("🎉 VAE synthetic data generation completed successfully!")
-        logger.info("📁 Files created:")
+        logger.info("📁 Files created in VAE_Dist/ folder:")
         logger.info("   - vae_combined_dataset.csv (3,000+ total samples)")
         logger.info("   - vae_data_comparison.png (distribution comparison)")
         logger.info("   - best_vae_model.pth (trained VAE model)")
+        logger.info("   - vae_checkpoint_epoch_*.pth (training checkpoints)")
         
     except Exception as e:
         logger.error(f"❌ Error: {e}")

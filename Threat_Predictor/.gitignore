@@ -4,3 +4,4 @@ wildfire data/
 .cache/
 *.pth
 *.png
+*.joblib
