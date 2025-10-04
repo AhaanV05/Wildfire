@@ -49,7 +49,7 @@ CDSE_TOTP          = _opt("CDSE_TOTP")  # optional
 CDSE_GRANT_TYPE    = _opt("CDSE_GRANT_TYPE", "password")
 
 # Switch for using Copernicus SWI at all (OData or CSV)
-USE_COPERNICUS_SWI = os.getenv("USE_COPERNICUS_SWI", "false").lower() in ("1","true","yes")
+USE_COPERNICUS_SWI = os.getenv("USE_COPERNICUS_SWI", "true").lower() in ("1","true","yes")
 
 # --- SWI settings ---
 SWI_COLLECTION_NAME     = _opt("SWI_COLLECTION_NAME", "CLMS")

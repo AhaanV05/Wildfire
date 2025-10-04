@@ -40,7 +40,7 @@ CREATE TABLE IF NOT EXISTS features_daily (
   precip_mm             DOUBLE PRECISION,
   vpd_kpa               DOUBLE PRECISION,   -- derived
   fwi                   DOUBLE PRECISION,   -- derived (Canadian FWI)
-  days_since_rain       INTEGER,            -- derived (≥0)
+  -- days_since_rain       INTEGER,            -- derived (≥0)
 
   -- 🌱 Vegetation & Fuels (closest composite to date)
   ndvi                  DOUBLE PRECISION,

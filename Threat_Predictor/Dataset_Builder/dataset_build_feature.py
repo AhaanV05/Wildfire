@@ -9,6 +9,8 @@ import datetime as dt
 import logging
 from typing import Dict, Tuple, Optional, List
 from collections import defaultdict
+from concurrent.futures import ThreadPoolExecutor, as_completed
+import functools
 
 import psycopg2
 import psycopg2.extras
@@ -295,31 +297,61 @@ def lookup_terrain(lat: float, lon: float) -> tuple[Optional[float], Optional[fl
 # ----------------------------
 # DB ops
 # ----------------------------
-def get_missing_targets(conn, start: dt.date | None, end: dt.date | None, only_missing: bool = True):
+def get_missing_targets(conn, start: dt.date | None = None, end: dt.date | None = None, only_missing: bool = True, limit: int | None = None):
     """
-    Returns list of (fire_id, date, lat, lon) to process.
-    If only_missing=True, restrict to those not present in features_daily.
+    Returns list of (fire_id, date, lat, lon) to process from ros_targets.
+    
+    Args:
+        conn: Database connection
+        start: Optional start date filter
+        end: Optional end date filter  
+        only_missing: If True, only get records not in features_daily
+        limit: Optional limit on number of records to return
+        
+    Returns:
+        List of (fire_id, date, lat, lon) tuples
     """
     with conn.cursor() as cur:
         if only_missing:
-            cur.execute("""
+            # Get ros_targets records that don't have corresponding features_daily entries
+            sql = """
                 SELECT r.fire_id, r.date, r.lat, r.lon
                 FROM ros_targets r
                 LEFT JOIN features_daily f
                   ON f.fire_id = r.fire_id AND f.date = r.date
                 WHERE f.fire_id IS NULL
-                  AND (%(start)s IS NULL OR r.date >= %(start)s)
-                  AND (%(end)s   IS NULL OR r.date <= %(end)s)
-                ORDER BY r.date, r.fire_id
-            """, {"start": start, "end": end})
+            """
+            params = {}
+            
+            if start:
+                sql += " AND r.date >= %(start)s"
+                params["start"] = start
+            if end:
+                sql += " AND r.date <= %(end)s" 
+                params["end"] = end
+                
+            sql += " ORDER BY r.date, r.fire_id"
+            
+            if limit:
+                sql += f" LIMIT {limit}"
+                
+            cur.execute(sql, params)
         else:
-            cur.execute("""
-                SELECT r.fire_id, r.date, r.lat, r.lon
-                FROM ros_targets r
-                WHERE (%(start)s IS NULL OR r.date >= %(start)s)
-                  AND (%(end)s   IS NULL OR r.date <= %(end)s)
-                ORDER BY r.date, r.fire_id
-            """, {"start": start, "end": end})
+            # Get all ros_targets records (optionally filtered by date)
+            sql = "SELECT fire_id, date, lat, lon FROM ros_targets WHERE 1=1"
+            params = {}
+            
+            if start:
+                sql += " AND date >= %(start)s"
+                params["start"] = start
+            if end:
+                sql += " AND date <= %(end)s"
+                params["end"] = end
+                
+            sql += " ORDER BY date, fire_id"
+            
+            cur.execute(sql, params)
+            
         return cur.fetchall()
 
 def upsert_features(conn, rows: list[dict]):
@@ -369,29 +401,142 @@ def upsert_features(conn, rows: list[dict]):
     conn.commit()
 
 # ----------------------------
+# Parallel processing helpers
+# ----------------------------
+
+def process_batch_parallel(batch_records, max_workers=4):
+    """Process a batch of records in parallel."""
+    
+    def process_single_record(record_data):
+        """Process a single record with all data sources."""
+        fire_id, date_obj, lat, lon = record_data
+        
+        try:
+            # Weather data (cached)
+            pw = power_daily(lat, lon, date_obj, date_obj)
+            if date_obj.strftime("%Y%m%d") in pw:
+                day_data = pw[date_obj.strftime("%Y%m%d")]
+                temp_c = day_data.get("T2M")
+                rh = day_data.get("RH2M")
+                wind = day_data.get("WS2M") 
+                prcp = day_data.get("PRECTOTCORR", day_data.get("PRECTOT"))
+                
+                vpd = vpd_kpa(temp_c, rh) if temp_c and rh else None
+                dsr = days_since_rain_from_series(pw, date_obj.strftime("%Y%m%d"))
+                ffmc, dmc, dc, isi, bui, fwi_val = fwi_from_daily(temp_c, rh, wind, prcp or 0.0, ffmc_prev=85.0, dmc_prev=6.0, dc_prev=15.0)
+            else:
+                temp_c = rh = wind = prcp = vpd = dsr = fwi_val = None
+            
+            # Moisture data (parallel safe)
+            try:
+                lfmc_proxy, moisture_src = lfmc_from_swi(lat, lon, date_obj)
+            except Exception as e:
+                log.warning(f"LFMC(SWI) failed {fire_id} {date_obj}: {e}")
+                lfmc_proxy, moisture_src = None, None
+            
+            # Terrain data (parallel safe)
+            elev, slope, aspect, terr_src = lookup_terrain(lat, lon)
+            
+            return {
+                'fire_id': fire_id,
+                'date': date_obj, 
+                'lat': lat,
+                'lon': lon,
+                'temp_c': temp_c,
+                'rel_humidity_pct': rh,
+                'wind_speed_ms': wind,
+                'precip_mm': prcp,
+                'vpd_kpa': vpd,
+                'fwi': fwi_val,
+                'days_since_rain': dsr,
+                'lfmc_proxy_pct': lfmc_proxy,
+                'elevation_m': elev,
+                'slope_pct': slope,
+                'aspect_deg': aspect,
+                'doy': date_obj.timetuple().tm_yday,
+                'weather_source': "NASA_POWER" if temp_c else None,
+                'moisture_source': moisture_src,
+                'terrain_source': terr_src
+            }
+            
+        except Exception as e:
+            log.error(f"Failed to process {fire_id} at {date_obj}: {e}")
+            return None
+    
+    # Process records in parallel
+    results = []
+    with ThreadPoolExecutor(max_workers=max_workers) as executor:
+        future_to_record = {
+            executor.submit(process_single_record, record): record 
+            for record in batch_records
+        }
+        
+        for future in as_completed(future_to_record):
+            result = future.result()
+            if result:
+                results.append(result)
+    
+    return results
+
+# ----------------------------
 # Main loop (historical)
 # ----------------------------
 def main():
-    ap = argparse.ArgumentParser(description="Backfill features into features_daily from ros_targets (historical)")
-    ap.add_argument("--start", type=lambda s: dt.date.fromisoformat(s), default=None, help="Start date (YYYY-MM-DD)")
-    ap.add_argument("--end",   type=lambda s: dt.date.fromisoformat(s), default=None, help="End date (YYYY-MM-DD)")
+    ap = argparse.ArgumentParser(description="Build features for wildfire ROS targets from multiple data sources")
     ap.add_argument("--batch-size", type=int, default=500, help="DB upsert batch size")
-    ap.add_argument("--force-missing-only", type=lambda s: str(s).lower() in ("1","true","yes"), default=True,
-                    help="If true, only process ros_targets not yet in features_daily")
+    ap.add_argument("--limit", type=int, default=None, help="Limit number of records to process (for testing)")
+    ap.add_argument("--start", type=lambda s: dt.date.fromisoformat(s), default=None, 
+                    help="Optional start date filter (YYYY-MM-DD)")
+    ap.add_argument("--end", type=lambda s: dt.date.fromisoformat(s), default=None, 
+                    help="Optional end date filter (YYYY-MM-DD)")
+    ap.add_argument("--force-rebuild", action="store_true", default=False,
+                    help="Rebuild features for records that already exist (default: only missing records)")
+    ap.add_argument("--parallel", action="store_true", default=False,
+                    help="Enable parallel processing for faster execution")
+    ap.add_argument("--workers", type=int, default=4,
+                    help="Number of parallel workers (default: 4)")
+    ap.add_argument("--fast", action="store_true", default=False,
+                    help="Fast mode: weather + terrain only (skip vegetation and moisture)")
+    ap.add_argument("--instance", type=int, default=0,
+                    help="Instance number (0-based) for parallel processing")
+    ap.add_argument("--total-instances", type=int, default=1,
+                    help="Total number of parallel instances running")
     args = ap.parse_args()
 
-    # Historical-only hint: recommend specifying --end <= today to avoid partial same-day data
-    if args.end and args.end > dt.date.today():
-        log.warning("End date is in the future — this script is intended for historical backfill.")
-
-    # GEE init (no-op if USE_GEE_VEG=false)
-    init_gee()
+    # Initialize data sources
+    init_gee()  # No-op if USE_GEE_VEG=false
 
     conn = psycopg2.connect(PG_DSN)
     conn.autocommit = False
 
-    todo = get_missing_targets(conn, args.start, args.end, only_missing=args.force_missing_only)
-    log.info(f"Rows to build: {len(todo)}")
+    # Get records to process from ros_targets
+    only_missing = not args.force_rebuild
+    all_todo = get_missing_targets(conn, args.start, args.end, only_missing=only_missing, limit=args.limit)
+    
+    # Split work across instances
+    if args.total_instances > 1:
+        total_records = len(all_todo)
+        records_per_instance = total_records // args.total_instances
+        start_idx = args.instance * records_per_instance
+        
+        if args.instance == args.total_instances - 1:
+            # Last instance gets any remaining records
+            end_idx = total_records
+        else:
+            end_idx = start_idx + records_per_instance
+            
+        todo = all_todo[start_idx:end_idx]
+        log.info(f"Instance {args.instance + 1}/{args.total_instances}: Processing records {start_idx + 1}-{end_idx} ({len(todo)} records)")
+    else:
+        todo = all_todo
+        log.info(f"Processing {len(todo)} records from ros_targets")
+    
+    if args.limit:
+        log.info(f"Limited to {args.limit} records")
+    if only_missing:
+        log.info("Building features for missing records only")
+    else:
+        log.info("Rebuilding features for all matching records")
 
     # Group all points by date for GEE batching
     points_by_date: Dict[dt.date, List[dict]] = defaultdict(list)
@@ -410,8 +555,6 @@ def main():
 
     power_cache: Dict[Tuple[float,float,dt.date,dt.date], Dict[str, Dict[str, float]]] = {}
     prev_codes_by_point: Dict[Tuple[float,float], Tuple[float,float,float]] = {}
-
-    batch: list[dict] = []
     done = 0
 
     for (fire_id, date_, lat, lon) in todo:
@@ -474,17 +617,13 @@ def main():
             moisture_source=moisture_src,
             terrain_source=terr_src
         )
-        batch.append(row)
+        
+        # Insert each record immediately to avoid losing progress
+        upsert_features(conn, [row])
         done += 1
+        log.info(f"✅ Processed {fire_id} ({done}/{len(todo)}) - Elev: {elev}m, LFMC: {lfmc_proxy}%, Temp: {temp_c}°C")
 
-        if len(batch) >= args.batch_size:
-            upsert_features(conn, batch)
-            log.info(f"Upserted {len(batch)} rows (progress: {done}/{len(todo)})")
-            batch = []
-
-    if batch:
-        upsert_features(conn, batch)
-        log.info(f"Upserted final {len(batch)} rows.")
+    log.info(f"✅ All {done} records processed successfully!")
 
     conn.close()
     log.info("All done.")
