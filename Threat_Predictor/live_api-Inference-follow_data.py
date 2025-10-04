@@ -1,7 +1,24 @@
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
 # ============================================================
 # 🔥 Wildfire Threat Model – Deterministic Formulas
-# Inputs: Temperature, RH, WindSpeed, Precipitation, DaysSinceRain,
-#         VPD, FWI, NDVI, NDMI, FuelMoisture, Elevation, Slope, Aspect, ROS, lat, lon
 # No other variables allowed
 # ============================================================
 
