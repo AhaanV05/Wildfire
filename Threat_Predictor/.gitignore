@@ -2,3 +2,5 @@ threat/
 wildfire data/
 .env
 .cache/
+*.pth
+*.png
